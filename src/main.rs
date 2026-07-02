@@ -8,6 +8,7 @@ mod plugins;
 mod llm;
 mod hybrid_reasoning;
 mod rbac;
+mod mcp;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -50,6 +51,7 @@ async fn main() {
     let llm_router = LlmRouter::new();
     let hybrid_reasoner = HybridReasoningEngine::new();
     let security_manager = SecurityManager::new();
+    let mcp_registry = mcp::McpRegistry::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -425,6 +427,50 @@ async fn main() {
                 let logs = observability.get_audit_logs();
                 let resp = AcpResponse::success(request.id.clone(), json!({ "audit_logs": logs }));
                 println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "mcp_register_server" => {
+                let server_id = request.params.get("server_id").and_then(|v| v.as_str()).unwrap_or("default");
+                let url = request.params.get("endpoint_url").and_then(|v| v.as_str()).unwrap_or("");
+                let scope = request.params.get("scope").and_then(|v| v.as_str()).unwrap_or("workspace");
+
+                let config = mcp::McpServerConfig {
+                    server_id: server_id.to_string(),
+                    endpoint_url: url.to_string(),
+                    scope: scope.to_string(),
+                };
+                mcp_registry.register_server(config);
+                observability.record_audit("admin", "mcp_register_server", "Success");
+                let resp = AcpResponse::success(request.id.clone(), json!({ "status": "registered" }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "mcp_list_servers" => {
+                let list = mcp_registry.list_servers();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "servers": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "mcp_discover_tools" => {
+                let list = mcp_registry.discover_tools();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "tools": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "mcp_invoke_tool" => {
+                let name = request.params.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = request.params.get("arguments").cloned().unwrap_or(json!({}));
+
+                match mcp_registry.validate_and_invoke_tool(name, args) {
+                    Ok(res) => {
+                        observability.record_execution(5, false);
+                        observability.record_audit("user", &format!("mcp_invoke_tool:{}", name), "Success");
+                        let resp = AcpResponse::success(request.id.clone(), res);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        observability.record_execution(0, true);
+                        observability.record_audit("user", &format!("mcp_invoke_tool:{}", name), "Failure");
+                        let resp = AcpResponse::error(request.id.clone(), -32009, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
             }
             _ => {
                 let resp = AcpResponse::error(
