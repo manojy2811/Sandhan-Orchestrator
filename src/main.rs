@@ -4,6 +4,7 @@ mod context;
 mod orchestrator;
 mod spaces;
 mod observability;
+mod plugins;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -11,6 +12,7 @@ use context::{ContextManager, ContextCache};
 use orchestrator::SubagentOrchestrator;
 use spaces::SpacesManager;
 use observability::ObservabilityTracker;
+use plugins::PluginManager;
 use std::io::{self, BufRead};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -32,9 +34,10 @@ async fn main() {
     
     let spaces_base = PathBuf::from(sandbox.get_workspace_path()).join("spaces");
     let spaces_manager = SpacesManager::new(spaces_base);
-
-    // Instantiate Observability tracker
     let observability = ObservabilityTracker::new();
+
+    // Instantiate Plugin Manager
+    let plugin_manager = PluginManager::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -272,6 +275,53 @@ async fn main() {
                 let traces = observability.get_reasoning_traces();
                 let resp = AcpResponse::success(request.id.clone(), json!({ "traces": traces }));
                 println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "plugin_install" => {
+                let name = request.params.get("name").and_then(|v| v.as_str());
+                let desc = request.params.get("description").and_then(|v| v.as_str()).unwrap_or("marketplace plugin");
+                let cmds_val = request.params.get("commands").and_then(|v| v.as_array());
+
+                if let Some(n) = name {
+                    let cmds: Vec<String> = cmds_val
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let plugin = plugin_manager.install_plugin(n, desc, cmds);
+                    let resp = AcpResponse::success(request.id.clone(), json!(plugin));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'name'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "plugin_list" => {
+                let list = plugin_manager.list_installed();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "plugins": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "plugin_execute" => {
+                let name = request.params.get("name").and_then(|v| v.as_str());
+                let cmd = request.params.get("command").and_then(|v| v.as_str());
+
+                if let (Some(n), Some(c)) = (name, cmd) {
+                    match plugin_manager.run_plugin_command(n, c) {
+                        Ok(out) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!({ "output": out }));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32004, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'name' or 'command'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
             }
             _ => {
                 let resp = AcpResponse::error(
