@@ -11,6 +11,7 @@ mod rbac;
 mod mcp;
 mod a2a;
 mod checkpoint;
+mod evaluation;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -56,6 +57,7 @@ async fn main() {
     let mcp_registry = mcp::McpRegistry::new();
     let a2a_manager = a2a::A2aManager::new();
     let checkpoint_manager = checkpoint::CheckpointManager::new(false);
+    let eval_harness = evaluation::EvaluationHarness::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -595,6 +597,38 @@ async fn main() {
                     }
                     Err(e) => {
                         let resp = AcpResponse::error(request.id.clone(), -32012, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "eval_run" => {
+                let scenarios_val = request.params.get("scenarios").and_then(|v| v.as_array());
+                if let Some(arr) = scenarios_val {
+                    let scenarios: Vec<evaluation::EvalScenario> = arr
+                        .iter()
+                        .map(|v| serde_json::from_value(v.clone()).unwrap())
+                        .collect();
+
+                    let res = eval_harness.run_evaluation(scenarios);
+                    observability.record_audit("admin", "eval_run", "Success");
+                    let resp = AcpResponse::success(request.id.clone(), json!(res));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'scenarios'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "eval_gate_check" => {
+                let threshold = request.params.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.85);
+                match eval_harness.check_regression_gate(threshold) {
+                    Ok(msg) => {
+                        observability.record_audit("admin", "eval_gate_check", "Passed");
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "status": "passed", "message": msg }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        observability.record_audit("admin", "eval_gate_check", "Failed");
+                        let resp = AcpResponse::error(request.id.clone(), -32013, &e);
                         println!("{}", serde_json::to_string(&resp).unwrap());
                     }
                 }
