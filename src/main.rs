@@ -1,0 +1,96 @@
+mod protocol;
+mod sandbox;
+
+use protocol::{AcpRequest, AcpResponse};
+use sandbox::Sandbox;
+use std::io::{self, BufRead};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() {
+    let sandbox = match Sandbox::new() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to initialize sandbox environment: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let stdin = io::stdin();
+    let reader = stdin.lock();
+
+    // Stdin / Stdout message processing loop
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse ACP request JSON
+        let request: AcpRequest = match serde_json::from_str(&line) {
+            Ok(req) => req,
+            Err(e) => {
+                let err_resp = AcpResponse::error(
+                    serde_json::Value::Null,
+                    -32700,
+                    &format!("JSON parsing error: {}", e),
+                );
+                println!("{}", serde_json::to_string(&err_resp).unwrap());
+                continue;
+            }
+        };
+
+        // Router method dispatcher
+        match request.method.as_str() {
+            "execute" => {
+                let cmd = request.params.get("command").and_then(|v| v.as_str());
+                let args_val = request.params.get("args").and_then(|v| v.as_array());
+
+                if let Some(c) = cmd {
+                    let args: Vec<String> = args_val
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    match sandbox.execute_command(c, args).await {
+                        Ok(res) => {
+                            let resp = AcpResponse::success(request.id.clone(), res);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32000, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(
+                        request.id.clone(),
+                        -32602,
+                        "Missing mandatory parameter 'command'",
+                    );
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "get_workspace" => {
+                let path = sandbox.get_workspace_path();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "workspace_path": path }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            _ => {
+                let resp = AcpResponse::error(
+                    request.id.clone(),
+                    -32601,
+                    &format!("Method '{}' not found", request.method),
+                );
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+        }
+    }
+}
