@@ -2,14 +2,17 @@ mod protocol;
 mod sandbox;
 mod context;
 mod orchestrator;
+mod spaces;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
 use context::{ContextManager, ContextCache};
 use orchestrator::SubagentOrchestrator;
+use spaces::SpacesManager;
 use std::io::{self, BufRead};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -24,6 +27,10 @@ async fn main() {
     let context_manager = Arc::new(Mutex::new(ContextManager::new(4096)));
     let cache = ContextCache::new();
     let orchestrator = SubagentOrchestrator::new();
+    
+    // Setup spaces base directory in sandbox temp path
+    let spaces_base = PathBuf::from(sandbox.get_workspace_path()).join("spaces");
+    let spaces_manager = SpacesManager::new(spaces_base);
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -140,7 +147,6 @@ async fn main() {
                 let name = request.params.get("name").and_then(|v| v.as_str()).unwrap_or("worker");
                 let task = request.params.get("task").and_then(|v| v.as_str()).unwrap_or("assist");
                 
-                // Copy parent context history as starting memory context for the subagent
                 let history_snapshot: Vec<String> = {
                     let manager = context_manager.lock().unwrap();
                     manager.get_messages().iter().map(|m| format!("{}: {}", m.role, m.content)).collect()
@@ -172,6 +178,64 @@ async fn main() {
                     }
                 } else {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'subagent_id' or 'task'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "space_create" => {
+                let name = request.params.get("space_name").and_then(|v| v.as_str());
+                if let Some(n) = name {
+                    match spaces_manager.create_space(n) {
+                        Ok(sp) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!(sp));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32003, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'space_name'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "space_checkout" => {
+                let name = request.params.get("space_name").and_then(|v| v.as_str());
+                let branch = request.params.get("branch").and_then(|v| v.as_str());
+
+                if let (Some(n), Some(b)) = (name, branch) {
+                    match spaces_manager.checkout_branch(n, b) {
+                        Ok(sp) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!(sp));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32003, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'space_name' or 'branch'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "space_pr" => {
+                let name = request.params.get("space_name").and_then(|v| v.as_str());
+                let pr_id_val = request.params.get("pr_id").and_then(|v| v.as_u64());
+
+                if let (Some(n), Some(pr_id)) = (name, pr_id_val) {
+                    match spaces_manager.link_pull_request(n, pr_id as usize) {
+                        Ok(sp) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!(sp));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32003, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'space_name' or 'pr_id'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 }
             }
