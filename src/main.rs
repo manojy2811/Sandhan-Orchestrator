@@ -3,12 +3,14 @@ mod sandbox;
 mod context;
 mod orchestrator;
 mod spaces;
+mod observability;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
 use context::{ContextManager, ContextCache};
 use orchestrator::SubagentOrchestrator;
 use spaces::SpacesManager;
+use observability::ObservabilityTracker;
 use std::io::{self, BufRead};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -28,9 +30,11 @@ async fn main() {
     let cache = ContextCache::new();
     let orchestrator = SubagentOrchestrator::new();
     
-    // Setup spaces base directory in sandbox temp path
     let spaces_base = PathBuf::from(sandbox.get_workspace_path()).join("spaces");
     let spaces_manager = SpacesManager::new(spaces_base);
+
+    // Instantiate Observability tracker
+    let observability = ObservabilityTracker::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -77,10 +81,12 @@ async fn main() {
 
                     match sandbox.execute_command(c, args).await {
                         Ok(res) => {
+                            observability.record_execution(10, false);
                             let resp = AcpResponse::success(request.id.clone(), res);
                             println!("{}", serde_json::to_string(&resp).unwrap());
                         }
                         Err(e) => {
+                            observability.record_execution(0, true);
                             let resp = AcpResponse::error(request.id.clone(), -32000, &e);
                             println!("{}", serde_json::to_string(&resp).unwrap());
                         }
@@ -106,7 +112,11 @@ async fn main() {
                 if let Some(txt) = content {
                     let mut manager = context_manager.lock().unwrap();
                     manager.add_message(role, txt);
-                    let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success", "tokens": manager.current_tokens }));
+                    
+                    let tokens = manager.current_tokens;
+                    observability.record_execution(tokens, false);
+
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success", "tokens": tokens }));
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 } else {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'content'");
@@ -238,6 +248,30 @@ async fn main() {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'space_name' or 'pr_id'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 }
+            }
+            "telemetry_get" => {
+                let stats = observability.get_telemetry();
+                let resp = AcpResponse::success(request.id.clone(), json!(stats));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "reasoning_add" => {
+                let node = request.params.get("node").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let decision = request.params.get("decision").and_then(|v| v.as_str());
+                let justification = request.params.get("justification").and_then(|v| v.as_str());
+
+                if let (Some(dec), Some(just)) = (decision, justification) {
+                    observability.add_reasoning_step(node, dec, just);
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success" }));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'decision' or 'justification'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "reasoning_get" => {
+                let traces = observability.get_reasoning_traces();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "traces": traces }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
             }
             _ => {
                 let resp = AcpResponse::error(
