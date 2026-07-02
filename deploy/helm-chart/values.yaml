@@ -1,0 +1,22 @@
+replicaCount: 3
+
+image:
+  repository: manojy2811/sandhan-orchestrator
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1024Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+env:
+  GOOGLE_API_KEY: ""
+  TAVILY_API_KEY: ""

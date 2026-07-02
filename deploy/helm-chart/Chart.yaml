@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sandhan-orchestrator
+description: A Helm chart for deploying the Sandhan-Orchestrator ACP agent wrapper runtime.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
