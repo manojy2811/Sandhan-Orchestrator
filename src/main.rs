@@ -9,6 +9,7 @@ mod llm;
 mod hybrid_reasoning;
 mod rbac;
 mod mcp;
+mod a2a;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -52,6 +53,7 @@ async fn main() {
     let hybrid_reasoner = HybridReasoningEngine::new();
     let security_manager = SecurityManager::new();
     let mcp_registry = mcp::McpRegistry::new();
+    let a2a_manager = a2a::A2aManager::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -468,6 +470,77 @@ async fn main() {
                         observability.record_execution(0, true);
                         observability.record_audit("user", &format!("mcp_invoke_tool:{}", name), "Failure");
                         let resp = AcpResponse::error(request.id.clone(), -32009, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "a2a_register_agent" => {
+                let name = request.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let caps_val = request.params.get("capabilities").and_then(|v| v.as_array());
+                let input_schema = request.params.get("input_schema").cloned().unwrap_or(json!({}));
+                let output_schema = request.params.get("output_schema").cloned().unwrap_or(json!({}));
+
+                let caps: Vec<String> = caps_val
+                    .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                    .unwrap_or_default();
+
+                let card = a2a::AgentCard {
+                    name: name.to_string(),
+                    capabilities: caps,
+                    input_schema,
+                    output_schema,
+                };
+                a2a_manager.register_remote_agent(card.clone());
+                observability.record_audit("admin", &format!("a2a_register_agent:{}", name), "Success");
+                let resp = AcpResponse::success(request.id.clone(), json!(card));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "a2a_list_agents" => {
+                let list = a2a_manager.list_agent_cards();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "agents": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "a2a_delegate_task" => {
+                let task_id = request.params.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                let delegator = request.params.get("delegator").and_then(|v| v.as_str()).unwrap_or("");
+                let executor = request.params.get("executor").and_then(|v| v.as_str()).unwrap_or("");
+                let payload = request.params.get("payload").cloned().unwrap_or(json!({}));
+
+                // Check authorization first via RBAC
+                match security_manager.authorize_action(delegator, "a2a_delegate") {
+                    Ok(_) => {
+                        match a2a_manager.delegate_task(task_id, delegator, executor, payload) {
+                            Ok(task) => {
+                                observability.record_execution(15, false);
+                                observability.record_audit(delegator, &format!("a2a_delegate:{}", task_id), "Success");
+                                let resp = AcpResponse::success(request.id.clone(), json!(task));
+                                println!("{}", serde_json::to_string(&resp).unwrap());
+                            }
+                            Err(e) => {
+                                let resp = AcpResponse::error(request.id.clone(), -32010, &e);
+                                println!("{}", serde_json::to_string(&resp).unwrap());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        observability.record_audit(delegator, "a2a_delegate_denied", "Failure");
+                        let resp = AcpResponse::error(request.id.clone(), -32008, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "a2a_update_task" => {
+                let task_id = request.params.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                let status = request.params.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let artifact = request.params.get("artifact").cloned();
+
+                match a2a_manager.update_task_lifecycle(task_id, status, artifact) {
+                    Ok(task) => {
+                        let resp = AcpResponse::success(request.id.clone(), json!(task));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32011, &e);
                         println!("{}", serde_json::to_string(&resp).unwrap());
                     }
                 }
