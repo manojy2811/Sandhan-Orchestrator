@@ -1,10 +1,13 @@
 mod protocol;
 mod sandbox;
+mod context;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
+use context::{ContextManager, ContextCache};
 use std::io::{self, BufRead};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[tokio::main]
 async fn main() {
@@ -15,6 +18,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Instantiate Context Manager and Thread-safe cache
+    let context_manager = Arc::new(Mutex::new(ContextManager::new(4096)));
+    let cache = ContextCache::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -82,6 +89,50 @@ async fn main() {
                 let path = sandbox.get_workspace_path();
                 let resp = AcpResponse::success(request.id.clone(), json!({ "workspace_path": path }));
                 println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "context_add" => {
+                let role = request.params.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                let content = request.params.get("content").and_then(|v| v.as_str());
+
+                if let Some(txt) = content {
+                    let mut manager = context_manager.lock().unwrap();
+                    manager.add_message(role, txt);
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success", "tokens": manager.current_tokens }));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'content'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "context_get" => {
+                let manager = context_manager.lock().unwrap();
+                let msgs = manager.get_messages();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "messages": msgs, "tokens": manager.current_tokens }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "cache_get" => {
+                let key = request.params.get("key").and_then(|v| v.as_str());
+                if let Some(k) = key {
+                    let val = cache.get(k);
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "value": val }));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'key'");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "cache_set" => {
+                let key = request.params.get("key").and_then(|v| v.as_str());
+                let value = request.params.get("value").and_then(|v| v.as_str());
+
+                if let (Some(k), Some(v)) = (key, value) {
+                    cache.insert(k.to_string(), v.to_string());
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success" }));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing 'key' or 'value' parameter");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
             }
             _ => {
                 let resp = AcpResponse::error(
