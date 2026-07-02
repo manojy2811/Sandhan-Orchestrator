@@ -62,6 +62,31 @@ Send JSON-RPC requests via standard input (stdin) to interact:
 {"jsonrpc":"2.0","method":"rbac_authorize","params":{"username":"admin","action":"execute"},"id":5}
 ```
 
+#### 6. Register MCP Server
+```json
+{"jsonrpc":"2.0","method":"mcp_register_server","params":{"server_id":"math-srv","endpoint_url":"http://localhost:8081","scope":"workspace"},"id":6}
+```
+
+#### 7. Delegate A2A Inter-Agent Task
+```json
+{"jsonrpc":"2.0","method":"a2a_delegate_task","params":{"task_id":"t_01","delegator":"admin","executor":"AegisCore","payload":{"source_code":"println!();"}},"id":7}
+```
+
+#### 8. Save State Checkpoint (Time-Travel)
+```json
+{"jsonrpc":"2.0","method":"checkpoint_save","params":{"checkpoint_id":"cp_01","state":{"stage":"init","tokens_left":200}},"id":8}
+```
+
+#### 9. Run Evaluation Harness Suite
+```json
+{"jsonrpc":"2.0","method":"eval_run","params":{"scenarios":[{"scenario_name":"t1","query":"test compile","expected_output":"success","expected_tools":[]}]},"id":9}
+```
+
+#### 10. Query Semantic Episodic Memory
+```json
+{"jsonrpc":"2.0","method":"memory_query","params":{"query":"refactor"},"id":10}
+```
+
 ## Cloud Deployment
 
 A pre-configured Helm chart is located in `deploy/helm-chart/`. To install the agent on your Kubernetes cluster:
