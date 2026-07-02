@@ -17,10 +17,19 @@ pub struct ReasoningStep {
     pub justification: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AuditRecord {
+    pub timestamp: u64,
+    pub user_role: String,
+    pub action: String,
+    pub status: String,
+}
+
 #[derive(Clone)]
 pub struct ObservabilityTracker {
     stats: Arc<RwLock<TelemetryStats>>,
     traces: Arc<RwLock<Vec<ReasoningStep>>>,
+    audit_logs: Arc<RwLock<Vec<AuditRecord>>>,
 }
 
 impl ObservabilityTracker {
@@ -32,6 +41,7 @@ impl ObservabilityTracker {
                 total_tokens_processed: 0,
             })),
             traces: Arc::new(RwLock::new(Vec::new())),
+            audit_logs: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -68,6 +78,28 @@ impl ObservabilityTracker {
 
     pub fn get_reasoning_traces(&self) -> Vec<ReasoningStep> {
         let read = self.traces.read().unwrap();
+        read.clone()
+    }
+
+    pub fn record_audit(&self, user_role: &str, action: &str, status: &str) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let record = AuditRecord {
+            timestamp: now,
+            user_role: user_role.to_string(),
+            action: action.to_string(),
+            status: status.to_string(),
+        };
+
+        let mut write = self.audit_logs.write().unwrap();
+        write.push(record);
+    }
+
+    pub fn get_audit_logs(&self) -> Vec<AuditRecord> {
+        let read = self.audit_logs.read().unwrap();
         read.clone()
     }
 }
