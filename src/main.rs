@@ -1,10 +1,12 @@
 mod protocol;
 mod sandbox;
 mod context;
+mod orchestrator;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
 use context::{ContextManager, ContextCache};
+use orchestrator::SubagentOrchestrator;
 use std::io::{self, BufRead};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -19,9 +21,9 @@ async fn main() {
         }
     };
 
-    // Instantiate Context Manager and Thread-safe cache
     let context_manager = Arc::new(Mutex::new(ContextManager::new(4096)));
     let cache = ContextCache::new();
+    let orchestrator = SubagentOrchestrator::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -131,6 +133,45 @@ async fn main() {
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 } else {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing 'key' or 'value' parameter");
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "subagent_spawn" => {
+                let name = request.params.get("name").and_then(|v| v.as_str()).unwrap_or("worker");
+                let task = request.params.get("task").and_then(|v| v.as_str()).unwrap_or("assist");
+                
+                // Copy parent context history as starting memory context for the subagent
+                let history_snapshot: Vec<String> = {
+                    let manager = context_manager.lock().unwrap();
+                    manager.get_messages().iter().map(|m| format!("{}: {}", m.role, m.content)).collect()
+                };
+
+                let agent_id = orchestrator.spawn_subagent(name, task, history_snapshot);
+                let resp = AcpResponse::success(request.id.clone(), json!({ "subagent_id": agent_id }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "subagent_list" => {
+                let list = orchestrator.list_subagents();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "subagents": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "subagent_execute" => {
+                let agent_id = request.params.get("subagent_id").and_then(|v| v.as_str());
+                let task = request.params.get("task").and_then(|v| v.as_str());
+
+                if let (Some(id), Some(t)) = (agent_id, task) {
+                    match orchestrator.execute_subagent_task(id, t) {
+                        Ok(output) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!({ "output": output }));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32002, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'subagent_id' or 'task'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 }
             }
