@@ -10,6 +10,7 @@ mod hybrid_reasoning;
 mod rbac;
 mod mcp;
 mod a2a;
+mod checkpoint;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -54,6 +55,7 @@ async fn main() {
     let security_manager = SecurityManager::new();
     let mcp_registry = mcp::McpRegistry::new();
     let a2a_manager = a2a::A2aManager::new();
+    let checkpoint_manager = checkpoint::CheckpointManager::new(false);
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -541,6 +543,58 @@ async fn main() {
                     }
                     Err(e) => {
                         let resp = AcpResponse::error(request.id.clone(), -32011, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "checkpoint_save" => {
+                let cp_id = request.params.get("checkpoint_id").and_then(|v| v.as_str()).unwrap_or("");
+                let parent_id = request.params.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let state = request.params.get("state").cloned().unwrap_or(json!({}));
+
+                match checkpoint_manager.save_state(cp_id, parent_id, state) {
+                    Ok(_) => {
+                        observability.record_audit("user", &format!("checkpoint_save:{}", cp_id), "Success");
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "status": "saved" }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32012, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "checkpoint_load" => {
+                let cp_id = request.params.get("checkpoint_id").and_then(|v| v.as_str()).unwrap_or("");
+                match checkpoint_manager.load_state(cp_id) {
+                    Ok(cp) => {
+                        let resp = AcpResponse::success(request.id.clone(), json!(cp));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32012, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "checkpoint_list" => {
+                let list = checkpoint_manager.list_checkpoints();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "checkpoints": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "checkpoint_fork" => {
+                let cp_id = request.params.get("checkpoint_id").and_then(|v| v.as_str()).unwrap_or("");
+                let new_id = request.params.get("new_id").and_then(|v| v.as_str()).unwrap_or("");
+                let modified = request.params.get("modified_inputs").cloned().unwrap_or(json!({}));
+
+                match checkpoint_manager.fork_checkpoint(cp_id, new_id, modified) {
+                    Ok(cp) => {
+                        observability.record_audit("user", &format!("checkpoint_fork:{}->{}", cp_id, new_id), "Success");
+                        let resp = AcpResponse::success(request.id.clone(), json!(cp));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32012, &e);
                         println!("{}", serde_json::to_string(&resp).unwrap());
                     }
                 }
