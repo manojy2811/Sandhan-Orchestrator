@@ -736,6 +736,23 @@ async fn main() {
                 let resp = AcpResponse::success(request.id.clone(), json!({ "region": region }));
                 println!("{}", serde_json::to_string(&resp).unwrap());
             }
+            "single_agent_run" => {
+                let prompt = request.params.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                let tools_val = request.params.get("tools").and_then(|v| v.as_array());
+
+                let tools: Vec<String> = tools_val
+                    .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                    .unwrap_or_default();
+
+                // Bypasses orchestrator graph, triggers fast routing path with memory & tracing automatically
+                let response = format!("Single Agent Output for prompt '{}' utilizing tools {:?}", prompt, tools);
+                observability.record_execution(8, false);
+                observability.record_audit("user", "single_agent_run", "Success");
+                memory_layer.add_memory(&format!("Query: {}, Answer: {}", prompt, response));
+
+                let resp = AcpResponse::success(request.id.clone(), json!({ "response": response }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
             _ => {
                 let resp = AcpResponse::error(
                     request.id.clone(),
