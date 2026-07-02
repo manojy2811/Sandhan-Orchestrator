@@ -5,6 +5,9 @@ mod orchestrator;
 mod spaces;
 mod observability;
 mod plugins;
+mod llm;
+mod hybrid_reasoning;
+mod rbac;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -13,6 +16,10 @@ use orchestrator::SubagentOrchestrator;
 use spaces::SpacesManager;
 use observability::ObservabilityTracker;
 use plugins::PluginManager;
+use llm::{LlmRouter, RoutingPolicy};
+use hybrid_reasoning::HybridReasoningEngine;
+use rbac::SecurityManager;
+
 use std::io::{self, BufRead};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -34,10 +41,15 @@ async fn main() {
     
     let spaces_base = PathBuf::from(sandbox.get_workspace_path()).join("spaces");
     let spaces_manager = SpacesManager::new(spaces_base);
+    
+    // Observability & Telemetry Tracker
     let observability = ObservabilityTracker::new();
 
-    // Instantiate Plugin Manager
+    // Plugin Manager, LLM Router, Hybrid reasoning, Security managers
     let plugin_manager = PluginManager::new();
+    let llm_router = LlmRouter::new();
+    let hybrid_reasoner = HybridReasoningEngine::new();
+    let security_manager = SecurityManager::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -280,19 +292,45 @@ async fn main() {
                 let name = request.params.get("name").and_then(|v| v.as_str());
                 let desc = request.params.get("description").and_then(|v| v.as_str()).unwrap_or("marketplace plugin");
                 let cmds_val = request.params.get("commands").and_then(|v| v.as_array());
+                let deps_val = request.params.get("dependencies").and_then(|v| v.as_array());
 
                 if let Some(n) = name {
                     let cmds: Vec<String> = cmds_val
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|v| v.as_str().unwrap_or("").to_string())
-                                .collect()
-                        })
+                        .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                        .unwrap_or_default();
+                        
+                    let deps: Vec<String> = deps_val
+                        .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
                         .unwrap_or_default();
 
-                    let plugin = plugin_manager.install_plugin(n, desc, cmds);
-                    let resp = AcpResponse::success(request.id.clone(), json!(plugin));
+                    match plugin_manager.install_plugin(n, desc, cmds, deps) {
+                        Ok(p) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!(p));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32005, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                } else {
+                    let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'name'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
+                }
+            }
+            "plugin_uninstall" => {
+                let name = request.params.get("name").and_then(|v| v.as_str());
+                if let Some(n) = name {
+                    match plugin_manager.uninstall_plugin(n) {
+                        Ok(_) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!({ "status": "success" }));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32005, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
                 } else {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameter 'name'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
@@ -322,6 +360,71 @@ async fn main() {
                     let resp = AcpResponse::error(request.id.clone(), -32602, "Missing parameters 'name' or 'command'");
                     println!("{}", serde_json::to_string(&resp).unwrap());
                 }
+            }
+            "llm_route" => {
+                let prompt = request.params.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                let policy_str = request.params.get("policy").and_then(|v| v.as_str()).unwrap_or("cost");
+                
+                let policy = match policy_str {
+                    "latency" => RoutingPolicy::LatencyAware,
+                    "task" => RoutingPolicy::TaskAware,
+                    _ => RoutingPolicy::CostAware,
+                };
+
+                match llm_router.route(prompt, policy) {
+                    Ok(out) => {
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "response": out }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32006, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "hybrid_reason" => {
+                let query = request.params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                
+                // If it can be resolved symbolically, do it!
+                if let Some(sym_res) = hybrid_reasoner.evaluate_hybrid(query) {
+                    let resp = AcpResponse::success(request.id.clone(), json!({ "source": "symbolic", "result": sym_res }));
+                    println!("{}", serde_json::to_string(&resp).unwrap());
+                } else {
+                    // Fallback to LLM router
+                    match llm_router.route(query, RoutingPolicy::CostAware) {
+                        Ok(llm_res) => {
+                            let resp = AcpResponse::success(request.id.clone(), json!({ "source": "llm_router", "result": llm_res }));
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                        Err(e) => {
+                            let resp = AcpResponse::error(request.id.clone(), -32007, &e);
+                            println!("{}", serde_json::to_string(&resp).unwrap());
+                        }
+                    }
+                }
+            }
+            "rbac_authorize" => {
+                let username = request.params.get("username").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let action = request.params.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+
+                match security_manager.authorize_action(username, action) {
+                    Ok(profile) => {
+                        observability.record_audit(&format!("{:?}", profile.role), action, "Authorized");
+                        let alert = security_manager.mock_jira_slack_alert(action, "Authorized");
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "profile": profile, "alert": alert }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        observability.record_audit("unauthorized", action, "Denied");
+                        let resp = AcpResponse::error(request.id.clone(), -32008, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "audit_get" => {
+                let logs = observability.get_audit_logs();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "audit_logs": logs }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
             }
             _ => {
                 let resp = AcpResponse::error(
