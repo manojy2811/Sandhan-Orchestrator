@@ -12,6 +12,7 @@ mod mcp;
 mod a2a;
 mod checkpoint;
 mod evaluation;
+mod enterprise;
 
 use protocol::{AcpRequest, AcpResponse};
 use sandbox::Sandbox;
@@ -58,6 +59,12 @@ async fn main() {
     let a2a_manager = a2a::A2aManager::new();
     let checkpoint_manager = checkpoint::CheckpointManager::new(false);
     let eval_harness = evaluation::EvaluationHarness::new();
+    let policy_engine = enterprise::PolicyEngine::new();
+    let memory_layer = enterprise::MemoryLayer::new();
+    let model_tier_manager = enterprise::ModelTierManager::new();
+    let cost_attribution = enterprise::CostAttributionTracker::new();
+    let sim_manager = enterprise::SandboxSimulationManager::new();
+    let residency_manager = enterprise::ResidencyManager::new();
 
     let stdin = io::stdin();
     let reader = stdin.lock();
@@ -632,6 +639,102 @@ async fn main() {
                         println!("{}", serde_json::to_string(&resp).unwrap());
                     }
                 }
+            }
+            "policy_evaluate" => {
+                let action = request.params.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                let cost = request.params.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let sensitivity = request.params.get("sensitivity").and_then(|v| v.as_str()).unwrap_or("low");
+
+                match policy_engine.evaluate_action(action, cost, sensitivity) {
+                    Ok(auto_approved) => {
+                        observability.record_audit("user", &format!("policy_evaluate:{}", action), "Success");
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "auto_approved": auto_approved }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32014, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "memory_add" => {
+                let content = request.params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                memory_layer.add_memory(content);
+                observability.record_audit("user", "memory_add", "Success");
+                let resp = AcpResponse::success(request.id.clone(), json!({ "status": "added" }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "memory_query" => {
+                let query = request.params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let results = memory_layer.query_semantic_memories(query);
+                let resp = AcpResponse::success(request.id.clone(), json!({ "results": results }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "model_tier_get" => {
+                let role = request.params.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                let res = model_tier_manager.get_model_for_role(role);
+                let resp = AcpResponse::success(request.id.clone(), json!({ "config": res }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "cost_track" => {
+                let agent = request.params.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                let tokens = request.params.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let cost_per_token = request.params.get("cost_per_token").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                match cost_attribution.track_spend(agent, tokens, cost_per_token) {
+                    Ok(_) => {
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "status": "tracked" }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32015, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "cost_breakdown" => {
+                let list = cost_attribution.get_attribution_breakdown();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "breakdown": list }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "handoff_validate" => {
+                let payload = request.params.get("payload").cloned().unwrap_or(json!({}));
+                let schema = request.params.get("schema").cloned().unwrap_or(json!({}));
+
+                match enterprise::HandoffValidator::validate_handoff_contract(&payload, &schema) {
+                    Ok(_) => {
+                        let resp = AcpResponse::success(request.id.clone(), json!({ "status": "valid" }));
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                    Err(e) => {
+                        let resp = AcpResponse::error(request.id.clone(), -32016, &e);
+                        println!("{}", serde_json::to_string(&resp).unwrap());
+                    }
+                }
+            }
+            "sim_set" => {
+                let enable = request.params.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
+                sim_manager.set_simulation_mode(enable);
+                let resp = AcpResponse::success(request.id.clone(), json!({ "simulation_mode": enable }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "sim_run" => {
+                let tool = request.params.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                let res = sim_manager.execute_simulated_tool(tool);
+                let resp = AcpResponse::success(request.id.clone(), res);
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "region_pin" => {
+                let region = request.params.get("region").and_then(|v| v.as_str()).unwrap_or("");
+                residency_manager.pin_region(region);
+                observability.record_audit("admin", &format!("region_pin:{}", region), "Success");
+                let resp = AcpResponse::success(request.id.clone(), json!({ "region": region }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
+            }
+            "region_get" => {
+                let region = residency_manager.get_pinned_region();
+                let resp = AcpResponse::success(request.id.clone(), json!({ "region": region }));
+                println!("{}", serde_json::to_string(&resp).unwrap());
             }
             _ => {
                 let resp = AcpResponse::error(
